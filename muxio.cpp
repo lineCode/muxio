@@ -1,5 +1,6 @@
 #include <vector>
 #include <unordered_map>
+#include <alloca.h>
 #include "coroutine.h"
 #include "socket.h"
 #include "buffer.h"
@@ -64,7 +65,7 @@ wakeupread(int fd, int err)
 int
 muxio_listen(const char *ip, int port, muxio_listen_t cb, void *ud)
 {
-	int fd = socket_listen(ip, port); 
+	int fd = socket_listen(ip, port);
 	if (fd < 0)
 		return fd;
 	listens[fd].fd = fd;
@@ -171,7 +172,7 @@ muxio_self()
 	return h;
 }
 
-void 
+void
 muxio_wait()
 {
 	assert(waitco[muxio_self()] == false);
@@ -268,13 +269,11 @@ static inline void
 IO()
 {
 	int i;
-	int sz = sockets.size();
 	struct timeval tv = {};
-	sz = (sz + 63) / 64;
-	fd_set rset[sz];
-	fd_set wset[sz];
-	int mfd[sz] = {};
-
+	fd_set rset;
+	fd_set wset;
+	int mfd;
+	//TODO: support more than 64 sockets
 	socketscache.clear();
 	socketserror.clear();
 	tryaccept();
@@ -285,29 +284,25 @@ IO()
 	i = 0;
 	for (const auto &iter:sockets) {
 		int fd = iter.first;
-		int idx = i / 64;
 		socketscache[i] = fd;
-		FD_SET(fd, &rset[idx]);
-		FD_SET(fd, &wset[idx]);
-		if (fd > mfd[idx])
-			mfd[idx] = fd;
+		FD_SET(fd, &rset);
+		FD_SET(fd, &wset);
+		if (fd > mfd)
+			mfd = fd;
 		++i;
 	}
-	for (i = 0; i < (int)socketscache.size(); i++) {
-		if (i % 64 == 0)
-			select(mfd[i/64] + 1, &rset[i/64], &wset[i/64], NULL, &tv);
-		int fd = socketscache[i];
-		int err = processone(fd, &rset[i/64], &wset[i/64]);
+	select(mfd + 1, &rset, &wset, NULL, &tv);
+	for (auto fd:socketscache) {
+		int err = processone(fd, &rset, &wset);
 		if (err < 0)
 			socketserror.push_back(fd);
 	}
-
 	//process error
 	for (auto fd:socketserror)
 		clearsocket(fd);
 }
 
-void 
+void
 muxio_dispatch()
 {
 	IO();

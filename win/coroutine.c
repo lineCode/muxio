@@ -13,16 +13,16 @@
 #define STACK_SIZE                      (1024 * 1024)
 
 struct task {
-        int                     status;
-        void                    *arg;
-	void			(*func)(void *);
-        LPVOID                  fiber;
-	LPVOID			parent;
+        int status;
+        void *arg;
+	void (*func)(void *);
+        LPVOID fiber;
+	LPVOID parent;
 };
 
 struct task *C;
 
-struct task *
+static struct task *
 createtask(void (*cb)(void *), void *ud)
 {
 	struct task *t = (struct task *)my_malloc(sizeof(*t));
@@ -51,7 +51,7 @@ struct task *
 coroutine_create(task_entry_t *func,  void *arg)
 {
 	struct task *t = createtask(func, arg);
-	t->fiber = CreateFiber(0,  entry, t);
+	t->fiber = CreateFiber(STACK_SIZE,  entry, t);
 	return t;
 }
 

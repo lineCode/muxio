@@ -1,26 +1,24 @@
 #ifndef _COROUTINE_H
 #define _COTOUTINE_H
 
-
 struct coroutine;
 
 #define COROUTINE_SUSPEND       1
 #define COROUTINE_RUNNING       2
 #define COROUTINE_DEAD          3
-#define COROUTINE_NORMAL        4
 
-typedef void (coroutine_func_t)(struct coroutine *c, void *arg);
+typedef void (task_entry_t)(void *arg);
 
+int coroutine_init();
+void coroutine_exit();
 
-struct coroutine *coroutine_create();
-void coroutine_free(struct coroutine *C);
+struct task *coroutine_create(task_entry_t *cb, void *ud);
+struct task *coroutine_self();
+void coroutine_free(struct task *t);
 
-int coroutine_push(struct coroutine *C, coroutine_func_t *func, void *arg);
-
-void coroutine_yield(struct coroutine *C);
-void coroutine_resume(struct coroutine *C, int id);
-int coroutine_status(struct coroutine *C, int id);
-int coroutine_running(struct coroutine *C);
+void coroutine_yield();
+void coroutine_resume(struct task *t);
+int coroutine_status(struct task *t);
 
 #endif
 

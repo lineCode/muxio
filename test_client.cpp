@@ -1,5 +1,12 @@
-#include <Windows.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#define	sleep(n)	Sleep(n)
+#else
+#include <unistd.h>
+#define	sleep(n)	usleep(n * 1000)
+#endif
+
 #include "muxio.h"
 
 void comin(int fd, void *ud)
@@ -28,7 +35,7 @@ int main()
 		}
 
 		muxio_dispatch();
-		Sleep(100);
+		sleep(100);
 	}
 	muxio_exit();
 	return 0;

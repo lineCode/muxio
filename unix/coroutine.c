@@ -1,152 +1,197 @@
-/**
-=========================================================================
- Author: findstr
- Email: findstr@sina.com
- File Name: coroutine.c
- Description: (C)  2015-01  findstr
-   
- Edit History: 
-   2015-01-28    File created.
-=========================================================================
-**/
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <ucontext.h>
 
 #include "coroutine.h"
 
-#define my_malloc(a)                    malloc(a)
-#define my_free(a)                      free(a)
-#define my_realloc(ptr, size)           realloc(ptr, size)
+#define my_malloc(a)			malloc(a)
+#define my_free(a)			free(a)
+#define my_realloc(ptr, size)		realloc(ptr, size)
 
-#define STACK_SIZE                      (1024 * 1024)
+#define STACK_SIZE			(1024 * 1024)
+#define	STACK_INIT			(64)
 
 struct task {
-        int                     status;
-        struct ucontext         ctx;
-        unsigned char           stack[STACK_SIZE];
+	int status;
+	int stacksz;
+	int stackcap;
+	void *ud;
+	void (*cb) (void *ud);
+	unsigned char *stack;
+	struct task *parent;
+	struct ucontext ctx;
 };
 
-struct coroutine {
-        int                     running;
-        struct ucontext         ctx;
-        unsigned char           stack[STACK_SIZE];
-        int                     task_cnt;
-        int                     task_cap;       //TODO:if many task, optimise it
-        struct task             **task_list;    //for more cache line hit rate
-};
+static pthread_key_t T;
+static pthread_key_t CTX;
+
+static inline void
+setctx(struct task *t)
+{
+	pthread_setspecific(CTX, t);
+	return ;
+}
+
+static inline struct task *
+getctx()
+{
+	return (struct task *)pthread_getspecific(CTX);
+}
+
+static inline void
+setT(struct task *t)
+{
+	pthread_setspecific(T, t);
+}
+
+static inline struct task *
+getT()
+{
+	return (struct task *)pthread_getspecific(T);
+}
+
+static void
+entry(void *ud)
+{
+	struct task *arg = (struct task *)ud;
+	arg->status = COROUTINE_RUNNING;
+	arg->cb(arg->ud);
+	arg->status = COROUTINE_DEAD;
+	swapcontext(&arg->ctx, &arg->parent->ctx);
+	return ;
+}
 
 static struct task *
-_new_task(struct coroutine *C, coroutine_func_t *func, void *arg)
+createtask(void (*cb)(void *), void *ud, size_t stackcap)
 {
-        struct task *t;
-        
-        t = (struct task *)my_malloc(sizeof(*t));
- 
-        getcontext(&t->ctx);
-
-        t->status = COROUTINE_NORMAL;
-        t->ctx.uc_link = &C->ctx;
-        t->ctx.uc_stack.ss_sp = t->stack;
-        t->ctx.uc_stack.ss_size = sizeof(t->stack);
-        
-        makecontext(&t->ctx, (void(*)())func, 2, C, arg);
-        
-        return t;
+	struct task *t = (struct task *)my_malloc(sizeof(*t));
+	t->status = COROUTINE_SUSPEND;
+	t->stackcap = stackcap;
+	t->stacksz = stackcap;
+	t->ud = ud;
+	t->cb = cb;
+	t->stack = my_malloc(stackcap);
+	t->parent = NULL;
+	getcontext(&t->ctx);
+	return t;
 }
 
-static int 
-_add_task(struct coroutine *C, struct task *t)
+static void
+freetask(struct task *t)
 {
-        assert(t);
-
-        if (C->task_cnt >= C->task_cap) {
-                C->task_cap = C->task_cap * 2 + 1;
-                C->task_list = my_realloc(C->task_list, C->task_cap * sizeof(*t));
-        }
-
-        C->task_list[C->task_cnt] = t;
-
-        return C->task_cnt++;
+	if (t->stack)
+		my_free(t->stack);
+	my_free(t);
+	return ;
 }
 
-struct coroutine *coroutine_create()
+struct task *
+coroutine_create(task_entry_t *cb, void *ud)
 {
-        struct coroutine *C;
-
-        C = (struct coroutine *)my_malloc(sizeof(*C));
-        memset(C, 0, sizeof(*C));
-        C->running = -1;
-
-        return C;
+	struct task *t = createtask(cb, ud, STACK_INIT);
+	struct task *T = getT();
+	t->ctx.uc_stack.ss_sp = T->stack;
+	t->ctx.uc_stack.ss_size = T->stackcap;
+	makecontext(&t->ctx, (void (*)())entry, 1, t);
+	memcpy(t->stack, T->stack, t->stackcap);
+	t->stacksz = t->stackcap;
+	return t;
 }
 
-void coroutine_free(struct coroutine *C)
+void
+coroutine_free(struct task *t)
 {
-        int i;
-
-        assert(C);
-
-        for (i = 0; i < C->task_cnt; i++)
-                my_free(C->task_list[i]);
-
-        my_free(C->task_list);
-        my_free(C);
+	freetask(t);
+	return ;
 }
 
-int coroutine_push(struct coroutine *C, coroutine_func_t *func, void *arg)
+struct task *
+coroutine_self()
 {
-        int id;
-        struct task *t;
-
-        t = _new_task(C, func, arg);
-        id = _add_task(C, t);
-
-        return id;
+	return getctx();
 }
 
-void coroutine_yield(struct coroutine *C)
+static inline void
+savestack(struct task *t, void *top)
 {
-        int err;
-        
-        assert(C->running >= 0);
-
-        C->task_list[C->running]->status = COROUTINE_SUSPEND;
-        swapcontext(&C->task_list[C->running]->ctx, &C->ctx);
-
-        return ;
+	void *base = t->ctx.uc_stack.ss_sp;
+	int sz = top - base;
+	assert(sz > 0);
+	if (sz > t->stackcap) {
+		t->stack = my_realloc(t->stack, sz);
+		t->stackcap = sz;
+	}
+	t->stacksz = sz;
+	printf("save stack:%p-%d\n", base, sz);
+	memcpy(t->stack, base, sz);
+	return ;
 }
 
-void coroutine_resume(struct coroutine *C, int id)
+static inline void
+restorestack(struct task *t)
 {
-        assert(C);
-
-        C->running = id;
-        assert(id < C->task_cnt);
-
-        C->task_list[id]->status = COROUTINE_RUNNING;
-        
-        swapcontext(&C->ctx, &C->task_list[id]->ctx);
-
-        if (C->task_list[id]->status == COROUTINE_RUNNING)
-                C->task_list[id]->status = COROUTINE_DEAD;
-
-        return ;
+	struct task *T = getT();
+	void *base = T->stack;
+	assert(T->stackcap > t->stacksz);
+	memcpy(base, t->stack, t->stacksz);
+	t->ctx.uc_stack.ss_sp = base;
+	t->ctx.uc_stack.ss_size = T->stackcap;
+	fflush(stdout);
+	return ;
 }
 
-int coroutine_status(struct coroutine *C, int id)
+void
+coroutine_yield()
 {
-        assert(C);
-        assert(id < C->task_cnt);
-        assert(C->task_list[id]);
-        return C->task_list[id]->status;
+	struct task *self = getctx();
+	int dummp;
+	assert(self->parent); //main thread should not be yield
+	assert(self->status == COROUTINE_RUNNING);
+	self->status = COROUTINE_SUSPEND;
+	savestack(self, &dummp);
+	swapcontext(&self->ctx, &self->parent->ctx);
+	return ;
 }
 
-int coroutine_running(struct coroutine *C)
+void
+coroutine_resume(struct task *t)
 {
-        assert(C);
-        return C->running;
+	struct task *self = getctx();
+	assert(t->status == COROUTINE_SUSPEND);
+	setctx(t);
+	t->parent = self;
+	//printf("resume %p-%p\n", self, t);
+	restorestack(t);
+	swapcontext(&self->ctx, &t->ctx);
+	setctx(self);
+	return ;
+}
+
+int
+coroutine_status(struct task *t)
+{
+	return t->status;
+}
+
+int
+coroutine_init()
+{
+	struct task *t = createtask(NULL, NULL, STACK_SIZE);
+	printf("T %p\n", t);
+	pthread_key_create(&T, NULL);
+	pthread_key_create(&CTX, NULL);
+	setT(t);
+	setctx(t);
+	return 0;
+}
+
+void
+coroutine_exit()
+{
+	struct task *T = getT();
+	freetask(T);
 }
 
