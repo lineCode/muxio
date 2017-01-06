@@ -77,8 +77,10 @@ muxio_listen(const char *ip, int port, muxio_listen_t cb, void *ud)
 static inline void
 clearsocket(int fd)
 {
+	/*TODO:
 	if (readsuspend.count(fd))
 		wakeupread(fd, -1);
+		*/
 	socket_close(fd);
 	sockets.erase(fd);
 	return ;

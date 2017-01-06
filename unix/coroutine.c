@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -12,7 +13,7 @@
 #define my_realloc(ptr, size)		realloc(ptr, size)
 
 #define STACK_SIZE			(1024 * 1024)
-#define	STACK_INIT			(64)
+#define	STACK_INIT			(512)
 
 struct task {
 	int status;
@@ -25,32 +26,40 @@ struct task {
 	struct ucontext ctx;
 };
 
+struct taskmgr {
+	void *stack;
+	size_t stackcap;
+	struct task *main;
+	struct task *ctx;
+};
+
 static pthread_key_t T;
-static pthread_key_t CTX;
+
+static inline void
+setT(struct taskmgr *t)
+{
+	pthread_setspecific(T, t);
+}
+
+static inline struct taskmgr *
+getT()
+{
+	return (struct taskmgr *)pthread_getspecific(T);
+}
 
 static inline void
 setctx(struct task *t)
 {
-	pthread_setspecific(CTX, t);
+	struct taskmgr *T = getT();
+	T->ctx = t;
 	return ;
 }
 
 static inline struct task *
 getctx()
 {
-	return (struct task *)pthread_getspecific(CTX);
-}
-
-static inline void
-setT(struct task *t)
-{
-	pthread_setspecific(T, t);
-}
-
-static inline struct task *
-getT()
-{
-	return (struct task *)pthread_getspecific(T);
+	struct taskmgr *T = getT();
+	return T->ctx;
 }
 
 static void
@@ -91,12 +100,13 @@ freetask(struct task *t)
 struct task *
 coroutine_create(task_entry_t *cb, void *ud)
 {
+	struct taskmgr *T = getT();
 	struct task *t = createtask(cb, ud, STACK_INIT);
-	struct task *T = getT();
-	t->ctx.uc_stack.ss_sp = T->stack;
+	void *stack = T->stack;
+	t->ctx.uc_stack.ss_sp = stack;
 	t->ctx.uc_stack.ss_size = T->stackcap;
 	makecontext(&t->ctx, (void (*)())entry, 1, t);
-	memcpy(t->stack, T->stack, t->stackcap);
+	memcpy(t->stack, stack, t->stackcap);
 	t->stacksz = t->stackcap;
 	return t;
 }
@@ -117,29 +127,26 @@ coroutine_self()
 static inline void
 savestack(struct task *t, void *top)
 {
-	void *base = t->ctx.uc_stack.ss_sp;
-	int sz = top - base;
+	size_t basecap = t->ctx.uc_stack.ss_size;
+	void *base = t->ctx.uc_stack.ss_sp + basecap;
+	int sz = base - top;
 	assert(sz > 0);
 	if (sz > t->stackcap) {
 		t->stack = my_realloc(t->stack, sz);
 		t->stackcap = sz;
 	}
 	t->stacksz = sz;
-	printf("save stack:%p-%d\n", base, sz);
-	memcpy(t->stack, base, sz);
+	memcpy(t->stack, top, sz);
 	return ;
 }
 
 static inline void
 restorestack(struct task *t)
 {
-	struct task *T = getT();
-	void *base = T->stack;
-	assert(T->stackcap > t->stacksz);
-	memcpy(base, t->stack, t->stacksz);
-	t->ctx.uc_stack.ss_sp = base;
-	t->ctx.uc_stack.ss_size = T->stackcap;
-	fflush(stdout);
+	size_t basecap = t->ctx.uc_stack.ss_size;
+	void *base = t->ctx.uc_stack.ss_sp + basecap;
+	assert(basecap > t->stacksz);
+	memcpy(base - t->stacksz, t->stack, t->stacksz);
 	return ;
 }
 
@@ -147,11 +154,11 @@ void
 coroutine_yield()
 {
 	struct task *self = getctx();
-	int dummp;
+	int dummy;
 	assert(self->parent); //main thread should not be yield
 	assert(self->status == COROUTINE_RUNNING);
 	self->status = COROUTINE_SUSPEND;
-	savestack(self, &dummp);
+	savestack(self, &dummy);
 	swapcontext(&self->ctx, &self->parent->ctx);
 	return ;
 }
@@ -163,7 +170,7 @@ coroutine_resume(struct task *t)
 	assert(t->status == COROUTINE_SUSPEND);
 	setctx(t);
 	t->parent = self;
-	//printf("resume %p-%p\n", self, t);
+	t->status = COROUTINE_RUNNING;
 	restorestack(t);
 	swapcontext(&self->ctx, &t->ctx);
 	setctx(self);
@@ -179,19 +186,27 @@ coroutine_status(struct task *t)
 int
 coroutine_init()
 {
-	struct task *t = createtask(NULL, NULL, STACK_SIZE);
-	printf("T %p\n", t);
+	int dummy;
+	struct taskmgr *mgr = my_malloc(sizeof(*mgr));
+	(void) dummy;
+	//ensure stack direction
+	assert((uintptr_t)&dummy > (uintptr_t)&mgr);
 	pthread_key_create(&T, NULL);
-	pthread_key_create(&CTX, NULL);
-	setT(t);
-	setctx(t);
+	mgr->main = createtask(NULL, NULL, 0);
+	mgr->stackcap = STACK_SIZE;
+	mgr->stack = my_malloc(STACK_SIZE);
+	mgr->ctx = mgr->main;
+	setT(mgr);
 	return 0;
 }
 
 void
 coroutine_exit()
 {
-	struct task *T = getT();
-	freetask(T);
+	struct taskmgr *T = getT();
+	freetask(T->main);
+	if (T->stack)
+		my_free(T->stack);
+	return ;
 }
 

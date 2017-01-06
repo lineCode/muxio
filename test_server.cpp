@@ -10,12 +10,15 @@
 
 void comin(int fd, void *ud)
 {
-	int sz;
-	printf("new comin:%d\n", fd);
-	fflush(stdout);
-	int err = muxio_read(fd, (char *)&sz, sizeof(int));
-	printf("read fd:%d err:%d data:%d\n", fd, err, sz);
-	fflush(stdout);
+	for (;;) {
+		int sz;
+		printf("new comin:%d\n", fd);
+		fflush(stdout);
+		int err = muxio_read(fd, (char *)&sz, 4);
+		printf("read fd:%d err:%d data:%d\n", fd, err, sz);
+		muxio_write(fd, (char *)&sz, 4);
+		fflush(stdout);
+	}
 }
 
 int main()
